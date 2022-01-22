@@ -6,19 +6,22 @@
 
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Mime;
 using System.Security.Claims;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace AspNet.Security.OAuth.VisualStudio;
+namespace AspNet.Security.OAuth.Trovo;
 
-public partial class VisualStudioAuthenticationHandler : OAuthHandler<VisualStudioAuthenticationOptions>
+public partial class TrovoAuthenticationHandler : OAuthHandler<TrovoAuthenticationOptions>
 {
-    public VisualStudioAuthenticationHandler(
-        [NotNull] IOptionsMonitor<VisualStudioAuthenticationOptions> options,
+    private const string ClientIdHeaderName = "client-id";
+
+    public TrovoAuthenticationHandler(
+        [NotNull] IOptionsMonitor<TrovoAuthenticationOptions> options,
         [NotNull] ILoggerFactory logger,
         [NotNull] UrlEncoder encoder,
         [NotNull] ISystemClock clock)
@@ -32,8 +35,9 @@ public partial class VisualStudioAuthenticationHandler : OAuthHandler<VisualStud
         [NotNull] OAuthTokenResponse tokens)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, Options.UserInformationEndpoint);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+        request.Headers.Add(ClientIdHeaderName, Options.ClientId);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(MediaTypeNames.Application.Json));
+        request.Headers.Authorization = new AuthenticationHeaderValue("OAuth", tokens.AccessToken);
 
         using var response = await Backchannel.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, Context.RequestAborted);
         if (!response.IsSuccessStatusCode)
@@ -57,10 +61,9 @@ public partial class VisualStudioAuthenticationHandler : OAuthHandler<VisualStud
         var tokenRequestParameters = new Dictionary<string, string>
         {
             ["redirect_uri"] = context.RedirectUri,
-            ["client_assertion"] = Options.ClientSecret,
-            ["assertion"] = context.Code,
-            ["grant_type"] = "urn:ietf:params:oauth:grant-type:jwt-bearer",
-            ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ["code"] = context.Code,
+            ["client_secret"] = Options.ClientSecret,
+            ["grant_type"] = "authorization_code"
         };
 
         // PKCE https://tools.ietf.org/html/rfc7636#section-4.5, see BuildChallengeUrl
@@ -72,7 +75,9 @@ public partial class VisualStudioAuthenticationHandler : OAuthHandler<VisualStud
 
         using var request = new HttpRequestMessage(HttpMethod.Post, Options.TokenEndpoint);
 
-        request.Content = new FormUrlEncodedContent(tokenRequestParameters);
+        request.Headers.Add(ClientIdHeaderName, Options.ClientId);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(MediaTypeNames.Application.Json));
+        request.Content = new StringContent(JsonSerializer.Serialize(tokenRequestParameters), Encoding.UTF8, MediaTypeNames.Application.Json);
 
         using var response = await Backchannel.SendAsync(request, Context.RequestAborted);
 
@@ -85,19 +90,6 @@ public partial class VisualStudioAuthenticationHandler : OAuthHandler<VisualStud
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Context.RequestAborted));
 
         return OAuthTokenResponse.Success(payload);
-    }
-
-    protected override string BuildChallengeUrl([NotNull] AuthenticationProperties properties, [NotNull] string redirectUri)
-    {
-        var challengeUrl = base.BuildChallengeUrl(properties, redirectUri);
-
-        // Visual Studio Online/Azure DevOps uses "Assertion" instead of "code"
-        var challengeUri = new Uri(challengeUrl, UriKind.Absolute);
-        var query = QueryHelpers.ParseQuery(challengeUri.Query);
-
-        query["response_type"] = "Assertion";
-
-        return QueryHelpers.AddQueryString(Options.AuthorizationEndpoint, query);
     }
 
     private static partial class Log
